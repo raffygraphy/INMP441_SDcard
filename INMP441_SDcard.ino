@@ -19,14 +19,14 @@ const char filename[] = "/TEST1.wav";
 
 void setup() {
   Serial.begin(115200);
-  delay(5000);
+  delay(1000); // Wait for Serial monitor to initialize
 
   if (!SD.begin()) {
     Serial.println("Card Mount Failed");
     return;
   }
-  
-  listSDCardInfo();
+
+  listSDCardInfo(); // Now it's correctly placed after SD.begin()
 
   // I2S microphone setup
   i2s_config_t i2s_config = {
@@ -49,26 +49,27 @@ void setup() {
     .data_in_num = I2S_SD
   };
 
-  // Install and start I2S driver
-  i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
-  i2s_set_pin(I2S_PORT, &pin_config);
+  esp_err_t i2sDriverInstallStatus = i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
+  if (i2sDriverInstallStatus != ESP_OK) {
+    Serial.println("Failed to install I2S driver");
+    return;
+  }
 
-  // Create a new WAV file
-  int headerSize = 44; // WAV header size
-  long numSamples = 0;
-  int bitsPerSample = 16;
-  long sampleRate = SAMPLE_RATE;
-  byte header[headerSize];
-  File file;
+  esp_err_t i2sPinConfigStatus = i2s_set_pin(I2S_PORT, &pin_config);
+  if (i2sPinConfigStatus != ESP_OK) {
+    Serial.println("Failed to set I2S pins");
+    return;
+  }
 
-  SD.remove(filename); // Remove a previous version of the file if exists
-  file = SD.open(filename, FILE_WRITE);
+  File file = SD.open(filename, FILE_WRITE);
   if (!file) {
     Serial.println("Failed to open file for writing");
     return;
   }
 
-  writeWAVHeader(file, header, numSamples, sampleRate, bitsPerSample, CHANNELS);
+  long numSamples = 0;
+  byte header[44]; // Header size for WAV file is always 44 bytes
+  writeWAVHeader(file, header, numSamples, SAMPLE_RATE, SAMPLE_BITS, CHANNELS);
   
   int bufferLen = 64;
   int16_t buffer[bufferLen];
@@ -76,13 +77,17 @@ void setup() {
   unsigned long recordingStart = millis();
   while (millis() - recordingStart < record_time * 1000) {
     size_t bytesRead = 0;
+    // Reading from I2S
     i2s_read(I2S_PORT, &buffer, sizeof(buffer), &bytesRead, portMAX_DELAY);
-    file.write((const byte*)buffer, bytesRead);
-    numSamples += bytesRead / 2;
+    if (bytesRead > 0) {
+      file.write((const byte*)buffer, bytesRead);
+      numSamples += bytesRead / 2; // 2 bytes per sample (16-bit samples)
+    }
   }
 
-  file.seek(0); // Go back to the beginning of the file
-  writeWAVHeader(file, header, numSamples, sampleRate, bitsPerSample, CHANNELS);
+  // Rewriting the WAV header now that we know the total numSamples
+  file.seek(0);
+  writeWAVHeader(file, header, numSamples, SAMPLE_RATE, SAMPLE_BITS, CHANNELS);
   file.close();
 
   Serial.println("Recording finished");
@@ -99,20 +104,35 @@ void listSDCardInfo() {
     return;
   }
   Serial.print("SD Card Type: ");
-  if (cardType == CARD_MMC) {
-    Serial.println("MMC");
-  } else if (cardType == CARD_SD) {
-    Serial.println("SDSC");
-  } else if (cardType == CARD_SDHC) {
-    Serial.println("SDHC");
-  } else {
-    Serial.println("UNKNOWN");
+  switch (cardType) {
+    case CARD_MMC:
+      Serial.println("MMC");
+      break;
+    case CARD_SD:
+      Serial.println("SDSC");
+      break;
+    case CARD_SDHC:
+      Serial.println("SDHC");
+      break;
+    default:
+      Serial.println("UNKNOWN");
+      break;
   }
+
   uint64_t cardSize = SD.cardSize() / (1024 * 1024);
   Serial.printf("SD Card Size: %lluMB\n", cardSize);
 }
 
 void writeWAVHeader(File file, byte *header, long numSamples, long sampleRate, int bitsPerSample, int channels) {
-  CreateWavHeader(header, numSamples * bitsPerSample / 8 * channels);
+  // Calculate the total data size
+  // Each sample is bitsPerSample bits, which is bitsPerSample/8 bytes.
+  // numSamples is the total number of samples recorded.
+  int dataSize = numSamples * (bitsPerSample / 8) * channels;
+
+  // Now call CreateWavHeader with the correct arguments.
+  CreateWavHeader(header, dataSize);
+
+  // Write the header to the file
   file.write(header, 44);
 }
+
